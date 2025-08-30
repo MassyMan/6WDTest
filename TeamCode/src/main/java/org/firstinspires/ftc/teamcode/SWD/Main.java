@@ -2,7 +2,6 @@ package org.firstinspires.ftc.teamcode.SWD;
 
 import com.acmerobotics.roadrunner.Pose2d;
 import com.qualcomm.robotcore.hardware.DcMotor;
-import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.IMU;
@@ -12,19 +11,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Main {
-    public static final double inPerTick = 0.001; // ⚠️
+    public static final double inPerTick = 0.001; // ⚠️ Tune this
     private static final double turnKfwd = 0.01;
+    private static final double slowSpeed = 0.5;
 
-    public double waypointIdx = 0;
-
-    public double threshold;
-
-    private boolean slowdown;
-    private double slowdownDist; // Threshold for beginning slowdown
-    private static final double slowSpeed = 0.5; // slowdown speed
+    private int waypointIdx = 0;
 
     public double moveSpeed;
-    public double targetX, targetY, targetHeading;
+    public double targetX, targetY;
     public double currentX, currentY, currentHeading;
     public double leftPower, rightPower;
 
@@ -33,9 +27,8 @@ public class Main {
 
     DcMotor leftDriveF, leftDriveB, rightDriveF, rightDriveB;
 
-
     // =====================================
-    // Waypoint handling (cleaner version)
+    // Waypoint class
     // =====================================
     public static class Waypoint {
         public double x;
@@ -43,13 +36,15 @@ public class Main {
         public double moveSpeed;
         public double threshold;
         public boolean slowdown;
+        public double slowdownDist; // now per waypoint
 
-        public Waypoint(double x, double y, double moveSpeed, double threshold, boolean slowdown) {
+        public Waypoint(double x, double y, double moveSpeed, double threshold, boolean slowdown, double slowdownDist) {
             this.x = x;
             this.y = y;
             this.moveSpeed = moveSpeed;
             this.threshold = threshold;
             this.slowdown = slowdown;
+            this.slowdownDist = slowdownDist;
         }
     }
 
@@ -57,17 +52,21 @@ public class Main {
 
     public enum State {
         FORWARD_SPLINE,
-        BACKWARD_SPLINE,
-        TURN,
-        FINAL_ADJUSTMENT,
         BRAKE,
         IDLE
     }
     public State state = State.IDLE;
 
-    public Main(HardwareMap hardwareMap){
+    // =====================================
+    // Constructors
+    // =====================================
+    public Main(HardwareMap hardwareMap) {
+        this(hardwareMap, new Pose2d(0, 0, 0));
+    }
+
+    public Main(HardwareMap hardwareMap, Pose2d startPose) {
         // Drive Motors
-        leftDriveF = hardwareMap.get(DcMotor.class,"leftDriveF"); // TODO: Double-check config names
+        leftDriveF = hardwareMap.get(DcMotor.class,"leftDriveF");
         leftDriveB = hardwareMap.get(DcMotor.class, "leftDriveB");
         rightDriveF = hardwareMap.get(DcMotor.class, "rightDriveF");
         rightDriveB = hardwareMap.get(DcMotor.class, "rightDriveB");
@@ -82,20 +81,18 @@ public class Main {
         rightDriveF.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
         rightDriveB.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
 
-        // IMU Hardware name (in configuration)
+        // IMU
         IMU imu = hardwareMap.get(IMU.class, "imu");
 
-        // Start pose at origin
-        Pose2d startPose = new Pose2d(0, 0, 0); // TODO: move this to a different location so it can be configurable
+        // Localizer
         localizer = new TwoDeadWheelLocalizer(hardwareMap, imu, inPerTick, startPose);
     }
 
+    // =====================================
+    // Pose helpers
+    // =====================================
     public Pose2d getPose() {
         return localizer.getPose();
-    }
-
-    public double splineIdealHeading(double x, double y) {
-        return Math.atan2(y, x); // Takes current X & Y
     }
 
     public double getCurrentX() {
@@ -109,81 +106,106 @@ public class Main {
     }
 
     public double getCurrentHeading() {
-        return Math.toDegrees(getPose().heading.log()); // heading is a Rotation2d object, log() gives angle in radians
+        return Math.toDegrees(getPose().heading.log());
+    }
+
+    public void resetPose(Pose2d newPose) {
+        localizer.setPose(newPose);
+    }
+
+    // =====================================
+    // Driving helpers
+    // =====================================
+    public double splineIdealHeading() {
+        Waypoint wp = waypoints.get(waypointIdx);
+        double dx = wp.x - getCurrentX();
+        double dy = wp.y - getCurrentY();
+        return Math.atan2(dy, dx);
     }
 
     public double deltaHeadingSpline() {
-        double rawDelta = splineIdealHeading(targetX - getCurrentX(), targetY - getCurrentY()) - getCurrentHeading();
+        double rawDelta = splineIdealHeading() - Math.toRadians(getCurrentHeading());
         return utils.deltaAngleClip(rawDelta);
     }
 
     public void motorPowersFWD(double speed) {
         leftPower = speed + (deltaHeadingSpline() * turnKfwd);
-        rightPower = speed + (deltaHeadingSpline() * -turnKfwd);
-
+        rightPower = speed - (deltaHeadingSpline() * turnKfwd);
         applyDrivetrainPower(leftPower, rightPower);
-        // TODO: apply motor powers
     }
 
-    public void applyDrivetrainPower(double leftPower, double rightPower) { // Apply motor powers
+    public void applyDrivetrainPower(double leftPower, double rightPower) {
         leftDriveF.setPower(leftPower);
         leftDriveB.setPower(leftPower);
         rightDriveF.setPower(rightPower);
         rightDriveB.setPower(rightPower);
     }
 
-    // ==============================
+    // =====================================
     // Waypoint management
-    // ==============================
-    public void addWaypoint(double targetX, double targetY, double moveSpeed, double threshold, boolean slowdown) {
-        waypoints.add(new Waypoint(targetX, targetY, moveSpeed, threshold, slowdown));
+    // =====================================
+    public void addWaypoint(double targetX, double targetY, double moveSpeed, double threshold, boolean slowdown, double slowdownDist) {
+        waypoints.add(new Waypoint(targetX, targetY, moveSpeed, threshold, slowdown, slowdownDist));
     }
 
-    public List<Waypoint> getWaypoints() {
-        return waypoints;
+    private Waypoint getCurrentWaypoint() {
+        return waypoints.get(waypointIdx);
     }
 
-    // ==============================
-    // Spline driving
-    // ==============================
-    public void SplineToPointFWD(double targetX, double targetY, double moveSpeed, double threshold, boolean slowdown, double slowdownDist) {
-        this.targetX = targetX;
-        this.targetY = targetY;
-        this.moveSpeed = moveSpeed;
-        this.threshold = threshold;
-        this.slowdown = slowdown;
-        this.slowdownDist = slowdownDist;
-
-        state = State.FORWARD_SPLINE;
+    public boolean atThreshold(Waypoint wp) {
+        double dx = wp.x - getCurrentX();
+        double dy = wp.y - getCurrentY();
+        double dist = Math.hypot(dx, dy);
+        return dist <= wp.threshold;
     }
 
-    public boolean atThreshold() {
-        return Math.abs(targetX - getCurrentX() + targetY - getCurrentY()) <= threshold;
+    public boolean atSlowDown(Waypoint wp) {
+        double dx = wp.x - getCurrentX();
+        double dy = wp.y - getCurrentY();
+        double dist = Math.hypot(dx, dy);
+        return wp.slowdown && dist <= wp.slowdownDist;
     }
 
-    public boolean atSlowDown() {
-        return Math.abs(targetX - getCurrentX() + targetY - getCurrentY()) <= slowdownDist;
+    // =====================================
+    // Start spline sequence
+    // =====================================
+    public void startSplineSequence() {
+        waypointIdx = 0;
+        if (!waypoints.isEmpty()) {
+            state = State.FORWARD_SPLINE;
+        }
     }
 
     // =====================================
     // Main update loop
     // =====================================
     public void update() {
-        localizer.update(); // Update Field Pose Estimate
+        localizer.update();
 
         switch (state) {
             case FORWARD_SPLINE:
-                deltaHeadingSpline(); // Fetch delta heading to target hypotenuse
-
-                if (atThreshold()) {
+                if (waypointIdx >= waypoints.size()) {
                     state = State.IDLE;
-
-                } else if (slowdown && atSlowDown()) { // If the motor powers need to be changed
-                    moveSpeed *= slowSpeed; // Reduce target speed (at slow down dist)
+                    break;
                 }
 
-                motorPowersFWD(moveSpeed); // Set motor powers
+                Waypoint wp = getCurrentWaypoint();
 
+                if (atThreshold(wp)) {
+                    waypointIdx++;
+                    if (waypointIdx >= waypoints.size()) {
+                        state = State.BRAKE;
+                        break;
+                    }
+                    wp = getCurrentWaypoint();
+                }
+
+                double speed = wp.moveSpeed;
+                if (atSlowDown(wp)) {
+                    speed *= slowSpeed;
+                }
+
+                motorPowersFWD(speed);
                 break;
 
             case BRAKE:
